@@ -1,0 +1,24 @@
+# WeChat Image Downloader Requirements
+# Core dependencies for accessing WeChat database and file operations
+
+# Standard library modules (included with Python)
+# - sqlite3: Database access
+# - os, shutil: File operations
+# - json: Configuration handling
+# - datetime: Timestamp processing
+# - pathlib: Path handling
+# - argparse: Command line interface
+# - logging: Logging functionality
+# - hashlib: File hashing (optional)
+# - glob: File pattern matching
+
+# External dependencies (install with: pip install -r requirements.txt)
+Pillow>=9.0.0          # Image processing and thumbnail generation
+requests>=2.28.0       # HTTP requests (if downloading from URLs)
+cryptography>=3.4.8    # For encrypted WeChat databases (if needed)
+
+# Optional dependencies for enhanced functionality
+# Uncomment if needed:
+# pandas>=1.4.0         # Data analysis and CSV export
+# tqdm>=4.64.0          # Progress bars
+# colorama>=0.4.4       # Colored terminal output (Windows)
