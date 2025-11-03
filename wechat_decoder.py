@@ -1,10 +1,10 @@
 import os
 
 # Base folder containing all user folders
-input_folder = r"C:\Users\henry\Documents\WeChat Files\wxid_5zk2tbe173ua22\FileStorage\MsgAttach"
+input_folder = r"C:\Users\henry\OneDrive\xwechat_files\wxid_5zk2tbe173ua22_ebf7\msg\attach"
 
 # Output folder for decoded images
-output_base = r"C:\Users\henry\Documents\WeChat Decoded Images"
+output_base = r"C:\Users\henry\OneDrive\Documents\WeChat Decoded Images"
 os.makedirs(output_base, exist_ok=True)
 
 
