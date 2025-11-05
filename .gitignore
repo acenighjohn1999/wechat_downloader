@@ -1,3 +1,4 @@
 *.vs
 *.wsuo
 /.vs/wechat_downloader/v17/.wsuo
+/__pycache__/wechat_decoder.cpython-312.pyc
