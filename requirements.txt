@@ -16,6 +16,12 @@
 Pillow>=9.0.0          # Image processing and thumbnail generation
 requests>=2.28.0       # HTTP requests (if downloading from URLs)
 cryptography>=3.4.8    # For encrypted WeChat databases (if needed)
+watchdog>=3.0.0        # File system monitoring for real-time detection
+pyautogui>=0.9.54      # GUI automation for clicking and navigation
+pygetwindow>=0.0.9     # Window management (usually comes with pyautogui)
+pywin32>=305           # Windows API access for multi-monitor coordinate handling
+paddleocr>=2.7.0       # OCR for reading text from screen (Chinese + English)
+paddlepaddle>=2.5.0    # PaddleOCR backend
 
 # Optional dependencies for enhanced functionality
 # Uncomment if needed:

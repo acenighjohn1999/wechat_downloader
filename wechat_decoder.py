@@ -1,10 +1,11 @@
 import os
 
 # Base folder containing all user folders
-input_folder = r"C:\Users\henry\OneDrive\xwechat_files\wxid_5zk2tbe173ua22_ebf7\msg\attach"
+# input_folder = r"C:\Users\henry\OneDrive\xwechat_files\wxid_5zk2tbe173ua22_ebf7\msg\attach"
+input_folder = r"C:\Users\henry\OneDrive\Documents\WeChat Files\wxid_5zk2tbe173ua22\FileStorage\MsgAttach"
 
 # Output folder for decoded images
-output_base = r"C:\Users\henry\OneDrive\Documents\WeChat Decoded Images"
+output_base = r"C:\Users\henry\OneDrive\Documents\WeChat Decoded Images2"
 os.makedirs(output_base, exist_ok=True)
 
 
@@ -22,29 +23,32 @@ def decode_wechat_dat(input_path, output_path):
     with open(output_path, "wb") as f:
         f.write(data)
 
-for user_folder in os.listdir(input_folder):
-    user_path = os.path.join(input_folder, user_folder)
-    if not os.path.isdir(user_path):
-        continue
 
-    image_root = os.path.join(user_path, "Image")
-    if not os.path.exists(image_root):
-        continue
-
-    # Iterate over all month folders inside Image/
-    for month_folder in os.listdir(image_root):
-        month_path = os.path.join(image_root, month_folder)
-        if not os.path.isdir(month_path):
+if __name__ == "__main__":
+    # Only run batch processing when executed directly, not when imported
+    for user_folder in os.listdir(input_folder):
+        user_path = os.path.join(input_folder, user_folder)
+        if not os.path.isdir(user_path):
             continue
 
-        for file_name in os.listdir(month_path):
-            if file_name.lower().endswith(".dat"):
-                input_file = os.path.join(month_path, file_name)
+        image_root = os.path.join(user_path, "Image")
+        if not os.path.exists(image_root):
+            continue
 
-                # Create corresponding output path
-                output_folder = os.path.join(output_base, user_folder, "Image", month_folder)
-                os.makedirs(output_folder, exist_ok=True)
-                output_file = os.path.join(output_folder, file_name.replace(".dat", ".jpg"))
+        # Iterate over all month folders inside Image/
+        for month_folder in os.listdir(image_root):
+            month_path = os.path.join(image_root, month_folder)
+            if not os.path.isdir(month_path):
+                continue
 
-                decode_wechat_dat(input_file, output_file)
-                print(f"Decoded: {input_file} -> {output_file}")
+            for file_name in os.listdir(month_path):
+                if file_name.lower().endswith(".dat"):
+                    input_file = os.path.join(month_path, file_name)
+
+                    # Create corresponding output path
+                    output_folder = os.path.join(output_base, user_folder, "Image", month_folder)
+                    os.makedirs(output_folder, exist_ok=True)
+                    output_file = os.path.join(output_folder, file_name.replace(".dat", ".jpg"))
+
+                    decode_wechat_dat(input_file, output_file)
+                    print(f"Decoded: {input_file} -> {output_file}")
