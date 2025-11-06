@@ -4,6 +4,8 @@ import random
 import subprocess
 import threading
 import os
+import csv
+import pyperclip
 from datetime import datetime
 
 
@@ -14,6 +16,13 @@ class WeChatNavigator:
         pyautogui.FAILSAFE = True
         # Add small delay between actions
         pyautogui.PAUSE = 0.5
+        # For production mode monitoring
+        self.last_file_time = None
+        self.monitor_lock = threading.Lock()
+        self.new_files_detected = False
+        # CSV file and base path for folder mappings
+        self.csv_file = "wechat_folder_mappings.csv"
+        self.base_path = r"C:\Users\henry\OneDrive\Documents\WeChat Files\wxid_5zk2tbe173ua22\FileStorage\MsgAttach"
         
     def find_wechat_window(self):
         """Find the WeChat window on screen"""
@@ -65,7 +74,10 @@ class WeChatNavigator:
             return False
     
     def search_chat_with_ctrl_f(self, chat_name):
-        """Search for a chat using Ctrl+F (WeChat's built-in search)"""
+        """Search for a chat using Ctrl+F (WeChat's built-in search)
+        
+        Uses clipboard method to support Chinese and special characters
+        """
         print(f"Using Ctrl+F to search for: {chat_name}")
         
         try:
@@ -74,9 +86,24 @@ class WeChatNavigator:
             pyautogui.hotkey('ctrl', 'f')
             time.sleep(0.8)  # Wait for search box to appear
             
-            # Type the chat name
+            # Type the chat name using clipboard (supports Chinese characters)
             print(f"Typing chat name: {chat_name}")
-            pyautogui.write(chat_name, interval=0.1)
+            
+            # Check if chat name contains non-ASCII characters (Chinese, etc.)
+            has_special_chars = any(ord(char) > 127 for char in chat_name)
+            
+            if has_special_chars:
+                # Use clipboard method for Chinese/special characters
+                print("  Using clipboard method (contains Chinese/special characters)")
+                pyperclip.copy(chat_name)
+                time.sleep(0.1)
+                pyautogui.hotkey('ctrl', 'v')
+                time.sleep(0.3)
+            else:
+                # Use direct typing for ASCII-only text
+                print("  Using direct typing (ASCII only)")
+                pyautogui.write(chat_name, interval=0.1)
+            
             time.sleep(0.5)
             
             # Press Enter to navigate to the chat
@@ -91,8 +118,69 @@ class WeChatNavigator:
             print(f"✗ Error during Ctrl+F search: {e}")
             return False
     
-    def click_for_image(self):
-        """Click at multiple positions to find an image, stopping when preview opens"""
+    def get_folder_for_chat(self, chat_name):
+        """Look up the folder ID for a given chat name from CSV"""
+        if not os.path.exists(self.csv_file):
+            print(f"[Warning] {self.csv_file} not found, using default MsgAttach folder")
+            return None
+        
+        try:
+            with open(self.csv_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Match chat name (case-insensitive)
+                    if row['Store'].lower() == chat_name.lower():
+                        folder_id = row['Folder']
+                        folder_path = os.path.join(self.base_path, folder_id)
+                        print(f"[Folder Lookup] Found mapping: '{chat_name}' -> {folder_id}")
+                        print(f"[Folder Lookup] Monitoring path: {folder_path}")
+                        return folder_path
+                
+                print(f"[Warning] No folder mapping found for '{chat_name}' in CSV")
+                print(f"[Warning] Available chats: ", end="")
+                # Show available chats
+                f.seek(0)
+                reader = csv.DictReader(f)
+                stores = [row['Store'] for row in reader]
+                print(", ".join(stores))
+                return None
+                
+        except Exception as e:
+            print(f"[Error] Failed to read {self.csv_file}: {e}")
+            return None
+    
+    def monitor_file_changes(self, process, stop_event, timeout_seconds=10):
+        """Monitor the file monitor subprocess output for new .dat files"""
+        import re
+        
+        print(f"[File Monitor] Started monitoring for new .dat files (timeout: {timeout_seconds}s)")
+        
+        try:
+            while not stop_event.is_set():
+                line = process.stdout.readline()
+                if not line:
+                    break
+                
+                line = line.strip()
+                if line:
+                    print(f"[File Monitor] {line}")
+                    
+                    # Check if this line indicates a new .dat file was detected
+                    # Look for patterns like: ".dat file detected"
+                    if '.dat file detected' in line.lower():
+                        with self.monitor_lock:
+                            self.new_files_detected = True
+                            self.last_file_time = datetime.now()
+                            print(f"[File Monitor] ✓ New file detected at {self.last_file_time.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"[File Monitor] Error: {e}")
+    
+    def click_for_image(self, prod_mode=False):
+        """Click at multiple positions to find an image, stopping when preview opens
+        
+        Args:
+            prod_mode: If True, continues pressing left arrow until no new files detected
+        """
         if not self.wechat_window:
             print("WeChat window not initialized")
             return False
@@ -140,21 +228,14 @@ class WeChatNavigator:
             if self.check_image_preview_opened():
                 print(f"✓ Image Preview opened at position {i}")
                 
-                # Wait and navigate through images with left arrow
-                print("\nNavigating through images...")
-                time.sleep(3)
-                
-                print("Pressing left arrow (1/3)")
-                pyautogui.press('left')
-                time.sleep(3)
-                
-                print("Pressing left arrow (2/3)")
-                pyautogui.press('left')
-                time.sleep(3)
-                
-                print("Pressing left arrow (3/3)")
-                pyautogui.press('left')
-                time.sleep(3)
+                if prod_mode:
+                    # Production mode: keep navigating until no new files
+                    # Need to get chat_name from the calling context
+                    # This will be passed through click_for_image
+                    self.navigate_images_prod_mode(self.current_chat_name if hasattr(self, 'current_chat_name') else None)
+                else:
+                    # Normal mode: just 3 left arrows
+                    self.navigate_images_normal_mode()
                 
                 # Check if Image Preview is still open and close it
                 if self.check_image_preview_opened():
@@ -172,6 +253,167 @@ class WeChatNavigator:
         
         print("\n✗ Could not find clickable image at any position")
         return False
+    
+    def navigate_images_normal_mode(self):
+        """Navigate through 3 images with left arrow"""
+        print("\nNavigating through images (normal mode - 3 arrows)...")
+        time.sleep(3)
+        
+        print("Pressing left arrow (1/3)")
+        pyautogui.press('left')
+        time.sleep(3)
+        
+        print("Pressing left arrow (2/3)")
+        pyautogui.press('left')
+        time.sleep(3)
+        
+        print("Pressing left arrow (3/3)")
+        pyautogui.press('left')
+        time.sleep(3)
+    
+    def navigate_images_prod_mode(self, chat_name=None):
+        """Navigate through images continuously until no new .dat files detected
+        
+        Args:
+            chat_name: Name of the chat to look up folder path from CSV
+        """
+        print("\n" + "="*60)
+        print("PRODUCTION MODE: Continuous navigation enabled")
+        print("Will keep pressing left arrow until no new files detected")
+        print("="*60 + "\n")
+        
+        # Look up the folder path for this chat
+        folder_path = None
+        if chat_name:
+            folder_path = self.get_folder_for_chat(chat_name)
+        
+        if not folder_path:
+            print("[Warning] Using default MsgAttach folder for monitoring")
+            folder_path = self.base_path
+        
+        # Verify folder exists
+        if not os.path.exists(folder_path):
+            print(f"[Error] Folder does not exist: {folder_path}")
+            print("[Error] Cannot start production mode without valid folder")
+            return
+        
+        # Start file monitor subprocess
+        monitor_process = None
+        monitor_thread = None
+        stop_event = threading.Event()
+        
+        try:
+            # Start wechat_file_monitor.py monitoring the specific folder
+            start_time = datetime.now().strftime("%Y%m%d %H:%M")
+            
+            # Use a Python script approach to monitor specific folder
+            # Escape the folder path for the Python string
+            escaped_folder_path = folder_path.replace('\\', '\\\\')
+            
+            cmd = [
+                'python',
+                '-c',
+                f'''
+import os
+import time
+from datetime import datetime
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+class SimpleHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.lower().endswith('.dat'):
+            print(f".dat file detected (on_created): {{event.src_path}}", flush=True)
+    def on_modified(self, event):
+        if not event.is_directory and event.src_path.lower().endswith('.dat'):
+            print(f".dat file detected (on_modified): {{event.src_path}}", flush=True)
+
+observer = Observer()
+observer.schedule(SimpleHandler(), "{escaped_folder_path}", recursive=True)
+observer.start()
+print("Monitoring: {escaped_folder_path}", flush=True)
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    observer.stop()
+observer.join()
+'''
+            ]
+            
+            print(f"[File Monitor] Monitoring folder: {folder_path}")
+            monitor_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # Start monitoring thread
+            monitor_thread = threading.Thread(
+                target=self.monitor_file_changes,
+                args=(monitor_process, stop_event, 10),
+                daemon=True
+            )
+            monitor_thread.start()
+            
+            # Give monitor time to start up
+            time.sleep(2)
+            
+            arrow_count = 0
+            idle_cycles = 0
+            max_idle_cycles = 2  # Stop after 2 cycles with no new files
+            
+            while True:
+                # Reset new files flag
+                with self.monitor_lock:
+                    files_detected_this_cycle = self.new_files_detected
+                    self.new_files_detected = False
+                
+                # Press left arrow
+                arrow_count += 1
+                print(f"\n[Arrow {arrow_count}] Pressing left arrow...")
+                pyautogui.press('left')
+                
+                # Wait 2 seconds + random 0-1 second and monitor for new files
+                wait_time = 2 + random.random()
+                print(f"[Arrow {arrow_count}] Waiting {wait_time:.1f} seconds for new files...")
+                time.sleep(wait_time)
+                
+                # Check if new files were detected during the wait
+                with self.monitor_lock:
+                    new_files_in_wait = self.new_files_detected
+                    total_new_files = files_detected_this_cycle or new_files_in_wait
+                
+                if total_new_files:
+                    print(f"[Arrow {arrow_count}] ✓ New files detected, continuing...")
+                    idle_cycles = 0
+                else:
+                    idle_cycles += 1
+                    print(f"[Arrow {arrow_count}] No new files ({idle_cycles}/{max_idle_cycles} idle cycles)")
+                    
+                    if idle_cycles >= max_idle_cycles:
+                        print(f"\n{'='*60}")
+                        print(f"STOPPING: No new files detected for {max_idle_cycles} idle cycles")
+                        print(f"Total arrows pressed: {arrow_count}")
+                        print(f"{'='*60}\n")
+                        break
+        
+        finally:
+            # Clean up monitor process
+            if monitor_process:
+                print("[File Monitor] Stopping file monitor...")
+                stop_event.set()
+                monitor_process.terminate()
+                try:
+                    monitor_process.wait(timeout=2)
+                except:
+                    monitor_process.kill()
+            
+            if monitor_thread:
+                monitor_thread.join(timeout=1)
     
     def check_image_preview_opened(self):
         """Quick check if Image Preview window is currently open"""
@@ -212,10 +454,23 @@ class WeChatNavigator:
         print(f"✗ Image Preview window not found within {timeout} seconds")
         return False
     
-    def navigate_to_chat(self, chat_name, click_image=True):
-        """Main function to navigate to a specific chat and optionally click for an image"""
+    def navigate_to_chat(self, chat_name, click_image=True, prod_mode=False):
+        """Main function to navigate to a specific chat and optionally click for an image
+        
+        Args:
+            chat_name: Name of the chat to navigate to
+            click_image: Whether to search for and click images
+            prod_mode: If True, continuously navigate until no new .dat files detected
+        """
+        # Store chat name for production mode folder lookup
+        self.current_chat_name = chat_name
+        
         print(f"\n{'='*50}")
         print(f"WeChat Auto Navigator")
+        if prod_mode:
+            print(f"MODE: PRODUCTION (continuous until no new files)")
+        else:
+            print(f"MODE: NORMAL (3 arrow presses)")
         print(f"{'='*50}\n")
         
         # Step 1: Find WeChat window
@@ -233,7 +488,7 @@ class WeChatNavigator:
             time.sleep(1.0)  # Wait for chat to fully load
             
             # click_for_image now tries multiple positions and checks for preview
-            image_found = self.click_for_image()
+            image_found = self.click_for_image(prod_mode=prod_mode)
             
             if image_found:
                 print("\n✓ Image found and opened successfully!")
@@ -289,6 +544,12 @@ def main():
         action='store_false',
         help='Skip clicking for an image'
     )
+    parser.add_argument(
+        '--prod',
+        action='store_true',
+        default=False,
+        help='Production mode: continuously press left arrow until no new .dat files detected'
+    )
     
     args = parser.parse_args()
     
@@ -296,16 +557,23 @@ def main():
     
     print(f"Attempting to navigate to '{args.chat}' chat...")
     if args.click_image:
-        print("Will search for and click on an image in the chat")
+        if args.prod:
+            print("Will search for and click on an image, then continuously navigate")
+            print("Production mode: Will monitor for new .dat files and keep going")
+        else:
+            print("Will search for and click on an image in the chat")
     print("Make sure WeChat is open and visible!")
     print(f"\nStarting in {args.delay} seconds...")
     time.sleep(args.delay)
     
-    success = navigator.navigate_to_chat(args.chat, click_image=args.click_image)
+    success = navigator.navigate_to_chat(args.chat, click_image=args.click_image, prod_mode=args.prod)
     
     if success:
         if args.click_image:
-            print(f"\n✓ Successfully navigated to '{args.chat}' chat and found image!")
+            if args.prod:
+                print(f"\n✓ Successfully navigated to '{args.chat}' chat and completed production run!")
+            else:
+                print(f"\n✓ Successfully navigated to '{args.chat}' chat and found image!")
         else:
             print(f"\n✓ Successfully navigated to '{args.chat}' chat!")
     else:
@@ -336,8 +604,10 @@ FEATURES:
 2. Uses Ctrl+F to search for chat by name
 3. Automatically finds and clicks on images in the chat
 4. Navigates through multiple images using left arrow key
-5. Closes image preview when done
-6. All windows remain open after completion
+5. Two modes: Normal (3 arrows) and Production (continuous until no new files)
+6. Production mode monitors wechat_file_monitor for new .dat files
+7. Closes image preview when done
+8. All windows remain open after completion
 
 COMMAND LINE OPTIONS:
 ---------------------
@@ -358,10 +628,18 @@ COMMAND LINE OPTIONS:
 --no-click-image
     Skip image clicking, only navigate to the chat
 
+--prod
+    Production mode: Continuously press left arrow until no new .dat files detected.
+    Uses wechat_folder_mappings.csv to find the correct folder for the chat name.
+    Monitors the specific chat's folder (and subfolders) for new .dat files.
+    Waits 4-5 seconds (4 + random 0-1) between each arrow press.
+    Stops after 2 consecutive cycles with no new files detected.
+    Falls back to default MsgAttach folder if chat not found in CSV.
+
 USAGE EXAMPLES:
 ---------------
 
-1. Navigate to default chat (Meadowland) and find images:
+1. Navigate to default chat (Meadowland) and find images (normal mode - 3 arrows):
    python wechat_auto_navigator.py
 
 2. Navigate to a specific chat:
@@ -376,7 +654,13 @@ USAGE EXAMPLES:
 5. Custom delay before starting:
    python wechat_auto_navigator.py --chat "Family" --delay 5
 
-6. Using the batch file (Windows):
+6. PRODUCTION MODE - continuous navigation until no new files:
+   python wechat_auto_navigator.py --chat "Meadowland" --prod
+
+7. Production mode with custom chat:
+   python wechat_auto_navigator.py --chat "Wairau" --prod --delay 5
+
+8. Using the batch file (Windows):
    run_wechat_navigator.bat
    run_wechat_navigator.bat "ChatName"
    run_wechat_navigator.bat "太平 Meadowland 3"
@@ -390,7 +674,9 @@ BEHAVIOR:
 
 2. Chat Navigation:
    - Presses Ctrl+F to open search
-   - Types the chat name
+   - Types the chat name (uses clipboard for Chinese/special characters)
+   - Auto-detects if chat name contains Chinese characters
+   - Uses Ctrl+V for Chinese, direct typing for English
    - Presses Enter to navigate to chat
 
 3. Image Finding (if enabled):
@@ -400,6 +686,7 @@ BEHAVIOR:
    - Stops when Image Preview window opens
 
 4. Image Navigation (if image found):
+   NORMAL MODE:
    - Waits 3 seconds
    - Presses left arrow to go to previous image
    - Waits 3 seconds
@@ -409,6 +696,20 @@ BEHAVIOR:
    - Waits 3 seconds
    - Checks if Image Preview is still open
    - Presses Escape to close if still open
+   
+   PRODUCTION MODE (--prod):
+   - Looks up chat name in wechat_folder_mappings.csv
+   - Finds the specific folder ID for that chat
+   - Starts file monitor subprocess for that specific folder (and subfolders)
+   - Monitors for new .dat files in real-time (on_created and on_modified events)
+   - Continuously presses left arrow with 4-5 second intervals
+   - Wait time: 4 seconds + random(0-1) second between each arrow
+   - Checks for new file detections after each arrow press
+   - If new files detected: continues navigation (resets idle counter)
+   - If no new files: increments idle counter
+   - Stops after 2 consecutive cycles with no new files
+   - Terminates file monitor subprocess
+   - Closes Image Preview with Escape
 
 5. Completion:
    - Waits 10 seconds before finishing
@@ -420,6 +721,9 @@ REQUIREMENTS:
 - Python 3.7+
 - pyautogui (pip install pyautogui)
 - pygetwindow (pip install pygetwindow)
+- pyperclip (pip install pyperclip) - for Chinese character support
+- watchdog (pip install watchdog) - for production mode
+- wechat_folder_mappings.csv - for production mode folder lookup
 - WeChat Desktop application
 
 SAFETY FEATURES:

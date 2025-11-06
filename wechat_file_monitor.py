@@ -3,6 +3,7 @@ import time
 import argparse
 import csv
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from datetime import datetime
@@ -49,7 +50,7 @@ def get_all_thumb_folders():
 class DatFileHandler(FileSystemEventHandler):
     """Handler for monitoring .dat file creation"""
     
-    def __init__(self, baseline_time, monitor_folder, decode_files=True, folder_label="", processed_files=None):
+    def __init__(self, baseline_time, monitor_folder, decode_files=True, folder_label="", processed_files=None, executor=None):
         super().__init__()
         self.baseline_time = baseline_time
         self.monitor_folder = monitor_folder
@@ -57,6 +58,17 @@ class DatFileHandler(FileSystemEventHandler):
         self.folder_label = folder_label
         self.processed_files = processed_files if processed_files is not None else set()
         self.lock = threading.Lock()
+        self.executor = executor  # Thread pool for async decoding
+    
+    def decode_file_async(self, file_path, output_path):
+        """Decode a file asynchronously in the thread pool"""
+        try:
+            decode_wechat_dat(file_path, output_path)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{timestamp}] ✓ Decoded: {output_path}")
+        except Exception as decode_error:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{timestamp}] ✗ Decode failed for {file_path}: {decode_error}")
     
     def on_created(self, event):
         """Called when a file or directory is created"""
@@ -73,6 +85,17 @@ class DatFileHandler(FileSystemEventHandler):
                         return
                     self.processed_files.add(event.src_path)
                 
+                # For thumbnail mode (decode_files=False), check file size
+                if not self.decode_files:
+                    try:
+                        file_size = os.path.getsize(event.src_path)
+                        # Skip files larger than 15KB for thumbnail mode
+                        if file_size > 15 * 1024:  # 15KB in bytes
+                            return
+                    except Exception as size_error:
+                        # If we can't get size, skip the file
+                        return
+                
                 file_mtime = datetime.fromtimestamp(os.path.getmtime(event.src_path))
                 
                 # Only report if file is newer than baseline
@@ -80,25 +103,41 @@ class DatFileHandler(FileSystemEventHandler):
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     file_time_str = file_mtime.strftime("%Y-%m-%d %H:%M:%S")
                     folder_info = f" [{self.folder_label}]" if self.folder_label else ""
-                    print(f"[{timestamp}]{folder_info} New .dat file detected (on_created): {event.src_path}")
+                    
+                    # Show file size for thumbnail mode
+                    size_info = ""
+                    if not self.decode_files:
+                        try:
+                            file_size = os.path.getsize(event.src_path)
+                            size_kb = file_size / 1024
+                            size_info = f" (size: {size_kb:.1f} KB)"
+                        except:
+                            pass
+                    
+                    print(f"[{timestamp}]{folder_info} New .dat file detected (on_created): {event.src_path}{size_info}")
                     print(f"  File timestamp: {file_time_str}")
                     
-                    # Auto-decode the file if enabled
+                    # Auto-decode the file if enabled (asynchronously if executor available)
                     if self.decode_files:
-                        try:
-                            # Create output path mirroring the folder structure
-                            relative_path = os.path.relpath(event.src_path, self.monitor_folder)
-                            output_path = os.path.join(OUTPUT_BASE, relative_path)
-                            output_path = output_path.replace(".dat", ".jpg")
-                            
-                            # Create output directory if needed
-                            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                            
-                            # Decode the file
-                            decode_wechat_dat(event.src_path, output_path)
-                            print(f"  ✓ Decoded to: {output_path}")
-                        except Exception as decode_error:
-                            print(f"  ✗ Decode failed: {decode_error}")
+                        # Create output path mirroring the folder structure
+                        relative_path = os.path.relpath(event.src_path, self.monitor_folder)
+                        output_path = os.path.join(OUTPUT_BASE, relative_path)
+                        output_path = output_path.replace(".dat", ".jpg")
+                        
+                        # Create output directory if needed
+                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                        
+                        if self.executor:
+                            # Submit to thread pool for async processing
+                            print(f"  ⏳ Queued for decoding...")
+                            self.executor.submit(self.decode_file_async, event.src_path, output_path)
+                        else:
+                            # Fallback to synchronous decoding if no executor
+                            try:
+                                decode_wechat_dat(event.src_path, output_path)
+                                print(f"  ✓ Decoded to: {output_path}")
+                            except Exception as decode_error:
+                                print(f"  ✗ Decode failed: {decode_error}")
             except Exception as e:
                 print(f"Error checking file time: {e}")
     
@@ -130,22 +169,27 @@ class DatFileHandler(FileSystemEventHandler):
                     print(f"[{timestamp}]{folder_info} .dat file detected (on_modified): {event.src_path}")
                     print(f"  File timestamp: {file_time_str}")
                     
-                    # Auto-decode the file if enabled
+                    # Auto-decode the file if enabled (asynchronously if executor available)
                     if self.decode_files:
-                        try:
-                            # Create output path mirroring the folder structure
-                            relative_path = os.path.relpath(event.src_path, self.monitor_folder)
-                            output_path = os.path.join(OUTPUT_BASE, relative_path)
-                            output_path = output_path.replace(".dat", ".jpg")
-                            
-                            # Create output directory if needed
-                            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                            
-                            # Decode the file
-                            decode_wechat_dat(event.src_path, output_path)
-                            print(f"  ✓ Decoded to: {output_path}")
-                        except Exception as decode_error:
-                            print(f"  ✗ Decode failed: {decode_error}")
+                        # Create output path mirroring the folder structure
+                        relative_path = os.path.relpath(event.src_path, self.monitor_folder)
+                        output_path = os.path.join(OUTPUT_BASE, relative_path)
+                        output_path = output_path.replace(".dat", ".jpg")
+                        
+                        # Create output directory if needed
+                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                        
+                        if self.executor:
+                            # Submit to thread pool for async processing
+                            print(f"  ⏳ Queued for decoding...")
+                            self.executor.submit(self.decode_file_async, event.src_path, output_path)
+                        else:
+                            # Fallback to synchronous decoding if no executor
+                            try:
+                                decode_wechat_dat(event.src_path, output_path)
+                                print(f"  ✓ Decoded to: {output_path}")
+                            except Exception as decode_error:
+                                print(f"  ✗ Decode failed: {decode_error}")
             except Exception as e:
                 print(f"Error checking file time: {e}")
 
@@ -230,6 +274,16 @@ def polling_scan(folders_dict, baseline_time, decode_files, handlers_dict, stop_
                                 if file_path in handler.processed_files:
                                     continue
                                 
+                                # For thumbnail mode, check file size
+                                if not decode_files:
+                                    try:
+                                        file_size = os.path.getsize(file_path)
+                                        # Skip files larger than 15KB for thumbnail mode
+                                        if file_size > 15 * 1024:  # 15KB in bytes
+                                            continue
+                                    except:
+                                        continue
+                                
                                 # Check file modification time
                                 try:
                                     file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
@@ -242,7 +296,18 @@ def polling_scan(folders_dict, baseline_time, decode_files, handlers_dict, stop_
                                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                         file_time_str = file_mtime.strftime("%Y-%m-%d %H:%M:%S")
                                         folder_info = f" [{folder_name}]" if folder_name else ""
-                                        print(f"[{timestamp}]{folder_info} .dat file detected (polling): {file_path}")
+                                        
+                                        # Show file size for thumbnail mode
+                                        size_info = ""
+                                        if not decode_files:
+                                            try:
+                                                file_size = os.path.getsize(file_path)
+                                                size_kb = file_size / 1024
+                                                size_info = f" (size: {size_kb:.1f} KB)"
+                                            except:
+                                                pass
+                                        
+                                        print(f"[{timestamp}]{folder_info} .dat file detected (polling): {file_path}{size_info}")
                                         print(f"  File timestamp: {file_time_str}")
                                         
                                         # Auto-decode the file if enabled
@@ -347,11 +412,19 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
     for name, path in existing_folders.items():
         print(f"  [{name}]: {path}")
     print(f"Detection: Event-based + Polling backup (every 5s)")
+    if decode_files:
+        print(f"Decoding: Async thread pool (max 4 concurrent)")
     print(f"=" * 50)
     print()
     
     # Create shared processed files set
     processed_files = set()
+    
+    # Create thread pool executor for async decoding (only for msgattach mode)
+    executor = None
+    if decode_files:
+        executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="Decoder")
+        print("✓ Async decoding thread pool initialized (4 workers)\n")
     
     # First, scan for existing files in all folders
     for name, path in existing_folders.items():
@@ -364,7 +437,8 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
     observer = Observer()
     handlers_dict = {}
     for name, path in existing_folders.items():
-        event_handler = DatFileHandler(baseline_time, path, decode_files, folder_label=name, processed_files=processed_files)
+        event_handler = DatFileHandler(baseline_time, path, decode_files, folder_label=name, 
+                                       processed_files=processed_files, executor=executor)
         handlers_dict[name] = event_handler
         observer.schedule(event_handler, path, recursive=True)
     
@@ -390,6 +464,13 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
     
     observer.join()
     polling_thread.join(timeout=2)
+    
+    # Shutdown executor and wait for pending tasks
+    if executor:
+        print("Waiting for pending decoding tasks to complete...")
+        executor.shutdown(wait=True, cancel_futures=False)
+        print("All decoding tasks completed.")
+    
     print("Monitor stopped.")
 
 
@@ -474,6 +555,7 @@ BEHAVIOR:
 ---------
 1. On startup:
    - Displays configuration (folder, mode, baseline time)
+   - Initializes async thread pool (4 workers) for MsgAttach mode
    - Scans for existing files modified after baseline time
    - Reports found files and decodes them (if MsgAttach mode)
 
@@ -483,11 +565,23 @@ BEHAVIOR:
      b) Polling backup: Scans every 5 seconds to catch files missed by events
    - Reports files with detection method in the log (on_created/on_modified/polling)
    - Prevents duplicate processing using shared tracking set
-   - Auto-decodes files in MsgAttach mode
-   - Only prints file names in Thumbnail mode
+   - MsgAttach mode behavior:
+     * Files are immediately detected and reported
+     * Decoding happens asynchronously in background thread pool
+     * Shows "⏳ Queued for decoding..." immediately
+     * Shows "✓ Decoded" with timestamp when complete
+     * Can handle burst of files without blocking
+     * Up to 4 files decoded concurrently
+   - Thumbnail mode behavior:
+     * Only prints file names (no decoding)
+     * Shows file size in KB
+     * Filters out files larger than 15KB
+     * Only reports small thumbnail files
 
 3. To stop:
    - Press Ctrl+C to gracefully stop monitoring
+   - Waits for all pending decoding tasks to complete
+   - Ensures no files are left partially processed
 
 NOTES:
 ------
