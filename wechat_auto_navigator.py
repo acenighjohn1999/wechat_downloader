@@ -6,7 +6,14 @@ import threading
 import os
 import csv
 import pyperclip
+import sys
 from datetime import datetime
+
+# Set UTF-8 encoding for stdout/stderr to handle Unicode characters
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8')
 
 
 class WeChatNavigator:
@@ -175,11 +182,12 @@ class WeChatNavigator:
         except Exception as e:
             print(f"[File Monitor] Error: {e}")
     
-    def click_for_image(self, prod_mode=False):
+    def click_for_image(self, prod_mode=False, file_count=None):
         """Click at multiple positions to find an image, stopping when preview opens
         
         Args:
             prod_mode: If True, continues pressing left arrow until no new files detected
+            file_count: Number of files to download (prod mode only)
         """
         if not self.wechat_window:
             print("WeChat window not initialized")
@@ -229,10 +237,9 @@ class WeChatNavigator:
                 print(f"✓ Image Preview opened at position {i}")
                 
                 if prod_mode:
-                    # Production mode: keep navigating until no new files
-                    # Need to get chat_name from the calling context
-                    # This will be passed through click_for_image
-                    self.navigate_images_prod_mode(self.current_chat_name if hasattr(self, 'current_chat_name') else None)
+                    # Production mode: keep navigating until no new files or file-count based
+                    chat_name = self.current_chat_name if hasattr(self, 'current_chat_name') else None
+                    self.navigate_images_prod_mode(chat_name, file_count=file_count)
                 else:
                     # Normal mode: just 3 left arrows
                     self.navigate_images_normal_mode()
@@ -271,16 +278,43 @@ class WeChatNavigator:
         pyautogui.press('left')
         time.sleep(3)
     
-    def navigate_images_prod_mode(self, chat_name=None):
+    def navigate_images_by_count(self, file_count):
+        """Navigate through images by pressing left arrow file_count + 1 times
+        
+        Args:
+            file_count: Number of files to download
+        """
+        total_presses = file_count + 1
+        print(f"\nNavigating through {total_presses} images (file-count mode)...")
+        time.sleep(3)
+        
+        for i in range(1, total_presses + 1):
+            print(f"Pressing left arrow ({i}/{total_presses})")
+            pyautogui.press('left')
+            time.sleep(3)
+        
+        print(f"\n✓ Completed {total_presses} arrow presses")
+    
+    def navigate_images_prod_mode(self, chat_name=None, file_count=None):
         """Navigate through images continuously until no new .dat files detected
         
         Args:
             chat_name: Name of the chat to look up folder path from CSV
+            file_count: Number of files to download. If provided, skips file monitoring
         """
         print("\n" + "="*60)
-        print("PRODUCTION MODE: Continuous navigation enabled")
-        print("Will keep pressing left arrow until no new files detected")
+        if file_count:
+            print(f"PRODUCTION MODE: File-count based navigation")
+            print(f"Will press left arrow {file_count + 1} times")
+        else:
+            print("PRODUCTION MODE: Continuous navigation enabled")
+            print("Will keep pressing left arrow until no new files detected")
         print("="*60 + "\n")
+        
+        # If file count is provided, use simple arrow-press approach
+        if file_count:
+            self.navigate_images_by_count(file_count)
+            return
         
         # Look up the folder path for this chat
         folder_path = None
@@ -454,13 +488,14 @@ observer.join()
         print(f"✗ Image Preview window not found within {timeout} seconds")
         return False
     
-    def navigate_to_chat(self, chat_name, click_image=True, prod_mode=False):
+    def navigate_to_chat(self, chat_name, click_image=True, prod_mode=False, file_count=None):
         """Main function to navigate to a specific chat and optionally click for an image
         
         Args:
             chat_name: Name of the chat to navigate to
             click_image: Whether to search for and click images
             prod_mode: If True, continuously navigate until no new .dat files detected
+            file_count: Number of files to download (prod mode only)
         """
         # Store chat name for production mode folder lookup
         self.current_chat_name = chat_name
@@ -468,7 +503,10 @@ observer.join()
         print(f"\n{'='*50}")
         print(f"WeChat Auto Navigator")
         if prod_mode:
-            print(f"MODE: PRODUCTION (continuous until no new files)")
+            if file_count:
+                print(f"MODE: PRODUCTION (file-count based: {file_count} files)")
+            else:
+                print(f"MODE: PRODUCTION (continuous until no new files)")
         else:
             print(f"MODE: NORMAL (3 arrow presses)")
         print(f"{'='*50}\n")
@@ -488,7 +526,7 @@ observer.join()
             time.sleep(1.0)  # Wait for chat to fully load
             
             # click_for_image now tries multiple positions and checks for preview
-            image_found = self.click_for_image(prod_mode=prod_mode)
+            image_found = self.click_for_image(prod_mode=prod_mode, file_count=file_count)
             
             if image_found:
                 print("\n✓ Image found and opened successfully!")
@@ -550,6 +588,12 @@ def main():
         default=False,
         help='Production mode: continuously press left arrow until no new .dat files detected'
     )
+    parser.add_argument(
+        '--file-count',
+        type=int,
+        default=None,
+        help='Number of files to download (prod mode only). Will press left arrow this many times + 1'
+    )
     
     args = parser.parse_args()
     
@@ -558,15 +602,19 @@ def main():
     print(f"Attempting to navigate to '{args.chat}' chat...")
     if args.click_image:
         if args.prod:
-            print("Will search for and click on an image, then continuously navigate")
-            print("Production mode: Will monitor for new .dat files and keep going")
+            if args.file_count:
+                print(f"Will search for and click on an image, then press left arrow {args.file_count + 1} times")
+                print(f"Production mode: File count = {args.file_count}")
+            else:
+                print("Will search for and click on an image, then continuously navigate")
+                print("Production mode: Will monitor for new .dat files and keep going")
         else:
             print("Will search for and click on an image in the chat")
     print("Make sure WeChat is open and visible!")
     print(f"\nStarting in {args.delay} seconds...")
     time.sleep(args.delay)
     
-    success = navigator.navigate_to_chat(args.chat, click_image=args.click_image, prod_mode=args.prod)
+    success = navigator.navigate_to_chat(args.chat, click_image=args.click_image, prod_mode=args.prod, file_count=args.file_count)
     
     if success:
         if args.click_image:

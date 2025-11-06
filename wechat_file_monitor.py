@@ -458,14 +458,14 @@ class DatFileHandler(FileSystemEventHandler):
                 print(f"Error checking file time: {e}")
 
 
-def scan_existing_files(folder, baseline_time, folder_name="", decode_files=True, processed_files=None):
+def scan_existing_files(folder, baseline_time, folder_name="", decode_files=True, processed_files=None, activity_tracker=None, processing_queue=None):
     """Scan for existing .dat files modified after baseline time"""
     folder_label = f" in {folder_name}" if folder_name else ""
     print(f"Scanning{folder_label} for existing .dat files modified after {baseline_time.strftime('%Y-%m-%d %H:%M:%S')}...\n")
-    
+
     if processed_files is None:
         processed_files = set()
-    
+
     found_count = 0
     decoded_count = 0
     for root, dirs, files in os.walk(folder):
@@ -474,16 +474,45 @@ def scan_existing_files(folder, baseline_time, folder_name="", decode_files=True
                 file_path = os.path.join(root, file)
                 try:
                     file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
-                    
+
                     if file_mtime >= baseline_time:
                         file_time_str = file_mtime.strftime("%Y-%m-%d %H:%M:%S")
                         print(f"Found: {file_path}")
                         print(f"  File timestamp: {file_time_str}")
                         found_count += 1
-                        
+
                         # Mark as processed
                         processed_files.add(file_path)
-                        
+
+                        # For thumbnail mode, update activity tracker and queue
+                        if not decode_files and activity_tracker and processing_queue:
+                            # Check file size for thumbnail mode
+                            try:
+                                file_size = os.path.getsize(file_path)
+                                # Skip files larger than 15KB for thumbnail mode
+                                if file_size > 15 * 1024:  # 15KB in bytes
+                                    print(f"  Skipping file (size: {file_size/1024:.1f} KB > 15KB limit)")
+                                    continue
+                                else:
+                                    size_info = f" (size: {file_size/1024:.1f} KB)"
+                                    print(f"  File size: {file_size/1024:.1f} KB")
+                            except Exception as size_error:
+                                print(f"  Could not get file size: {size_error}")
+                                continue
+
+                            # Update activity tracker and queue
+                            folder_id, store_name = activity_tracker.update_activity(file_path)
+                            if folder_id and store_name:
+                                processing_queue.add_or_update(folder_id, store_name)
+                                file_count = activity_tracker.get_file_count(folder_id)
+
+                                # Check if currently processing this folder
+                                if processing_queue.mark_new_activity_during_processing(folder_id):
+                                    print(f"  ⚠️  Still processing - will re-queue after completion")
+                                else:
+                                    queue_pos = len(processing_queue.queue_items)
+                                    print(f"  ⏭️  Added to processing queue (position: {queue_pos}, {file_count} files total)")
+
                         # Auto-decode the file if enabled
                         if decode_files:
                             try:
@@ -491,10 +520,10 @@ def scan_existing_files(folder, baseline_time, folder_name="", decode_files=True
                                 relative_path = os.path.relpath(file_path, folder)
                                 output_path = os.path.join(OUTPUT_BASE, relative_path)
                                 output_path = output_path.replace(".dat", ".jpg")
-                                
+
                                 # Create output directory if needed
                                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                                
+
                                 # Decode the file
                                 decode_wechat_dat(file_path, output_path)
                                 print(f"  ✓ Decoded to: {output_path}")
@@ -503,7 +532,7 @@ def scan_existing_files(folder, baseline_time, folder_name="", decode_files=True
                                 print(f"  ✗ Decode failed: {decode_error}")
                 except Exception as e:
                     print(f"Error reading {file_path}: {e}")
-    
+
     if found_count > 0:
         print(f"\nFound {found_count} existing .dat file(s){folder_label} modified after baseline time.")
         if decode_files:
@@ -646,14 +675,15 @@ def queue_processor_thread(processing_queue, stop_event):
                 print(f"{'='*60}")
                 
                 # Start auto-navigation Python script directly
-                print(f"[Queue] 🚀 Starting: python wechat_auto_navigator.py --chat {store_name} --prod\n")
+                print(f"[Queue] 🚀 Starting: python wechat_auto_navigator.py --chat {store_name} --prod --file-count {file_count}\n")
                 
                 try:
-                    # Run the Python script directly with the store name and prod mode
+                    # Run the Python script directly with the store name, prod mode, and file count
                     result = subprocess.run(
-                        ['python', 'wechat_auto_navigator.py', '--chat', store_name, '--prod'],
+                        ['python', 'wechat_auto_navigator.py', '--chat', store_name, '--prod', '--file-count', str(file_count)],
                         capture_output=True,
                         text=True,
+                        encoding='utf-8',
                         timeout=600  # 10 minute timeout
                     )
 
@@ -804,7 +834,7 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
     
     # First, scan for existing files in all folders
     for name, path in existing_folders.items():
-        scan_existing_files(path, baseline_time, name, decode_files, processed_files)
+        scan_existing_files(path, baseline_time, name, decode_files, processed_files, activity_tracker, processing_queue)
     
     print("Starting continuous monitoring...")
     print("Press Ctrl+C to stop monitoring\n")
