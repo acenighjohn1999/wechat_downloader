@@ -1,6 +1,10 @@
 import pyautogui
 import time
 import random
+import subprocess
+import threading
+import os
+from datetime import datetime
 
 
 class WeChatNavigator:
