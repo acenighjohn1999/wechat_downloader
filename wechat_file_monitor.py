@@ -3,11 +3,13 @@ import time
 import argparse
 import csv
 import threading
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 from wechat_decoder import decode_wechat_dat
+from collections import defaultdict
 
 # Folders to monitor
 MONITOR_FOLDER = r"C:\Users\henry\OneDrive\Documents\WeChat Files\wxid_5zk2tbe173ua22\FileStorage\MsgAttach"
@@ -16,6 +18,191 @@ CSV_FILE = "wechat_folder_mappings.csv"
 
 # Output folder for decoded images
 OUTPUT_BASE = r"C:\Users\henry\OneDrive\Documents\WeChat Decoded Images2"
+
+# Configuration for auto-navigation queue
+IDLE_THRESHOLD_SECONDS = 60  # Process folder after 60 seconds of no activity
+QUEUE_CHECK_INTERVAL = 5  # Check queue every 5 seconds
+MIN_FILES_TO_PROCESS = 1  # Minimum files before processing
+
+
+class FolderActivityTracker:
+    """Tracks activity for each folder to determine when to process"""
+    
+    def __init__(self):
+        self.folder_last_activity = {}  # folder_id -> datetime
+        self.folder_file_counts = defaultdict(int)  # folder_id -> count
+        self.folder_to_store = {}  # folder_id -> store_name (from CSV)
+        self.lock = threading.Lock()
+        self.load_folder_mappings()
+    
+    def load_folder_mappings(self):
+        """Load folder ID to store name mappings from CSV"""
+        if not os.path.exists(CSV_FILE):
+            print(f"[Warning] {CSV_FILE} not found for folder mappings")
+            return
+        
+        try:
+            with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    folder_id = row['Folder']
+                    store_name = row['Store']
+                    self.folder_to_store[folder_id] = store_name
+            print(f"[Activity Tracker] Loaded {len(self.folder_to_store)} folder mappings from CSV")
+        except Exception as e:
+            print(f"[Activity Tracker] Error loading CSV: {e}")
+    
+    def update_activity(self, file_path):
+        """Update activity timestamp for a folder based on file path"""
+        # Extract folder ID from path like: .../MsgAttach/abc123/Thumb/2025-11/file.dat
+        try:
+            parts = file_path.split(os.sep)
+            # Find MsgAttach index and get folder ID after it
+            if 'MsgAttach' in parts:
+                msgattach_idx = parts.index('MsgAttach')
+                if msgattach_idx + 1 < len(parts):
+                    folder_id = parts[msgattach_idx + 1]
+                    
+                    with self.lock:
+                        self.folder_last_activity[folder_id] = datetime.now()
+                        self.folder_file_counts[folder_id] += 1
+                        
+                        # Get store name if available
+                        store_name = self.folder_to_store.get(folder_id, folder_id)
+                        return folder_id, store_name
+        except Exception as e:
+            pass
+        return None, None
+    
+    def get_idle_time(self, folder_id):
+        """Get seconds since last activity for a folder"""
+        with self.lock:
+            if folder_id in self.folder_last_activity:
+                return (datetime.now() - self.folder_last_activity[folder_id]).total_seconds()
+        return float('inf')
+    
+    def get_file_count(self, folder_id):
+        """Get file count for a folder"""
+        with self.lock:
+            return self.folder_file_counts.get(folder_id, 0)
+    
+    def get_store_name(self, folder_id):
+        """Get store name for a folder ID"""
+        return self.folder_to_store.get(folder_id, folder_id)
+    
+    def reset_folder(self, folder_id):
+        """Reset folder after successful processing"""
+        with self.lock:
+            if folder_id in self.folder_last_activity:
+                del self.folder_last_activity[folder_id]
+            if folder_id in self.folder_file_counts:
+                del self.folder_file_counts[folder_id]
+    
+    def get_all_active_folders(self):
+        """Get all folders with recent activity"""
+        with self.lock:
+            return list(self.folder_last_activity.keys())
+
+
+class ProcessingQueue:
+    """Manages queue of folders to process"""
+    
+    def __init__(self, activity_tracker):
+        self.queue_items = {}  # folder_id -> QueueItem
+        self.currently_processing = None
+        self.needs_reprocessing = set()
+        self.lock = threading.Lock()
+        self.activity_tracker = activity_tracker
+    
+    def add_or_update(self, folder_id, store_name):
+        """Add folder to queue or update if already exists"""
+        with self.lock:
+            if folder_id not in self.queue_items:
+                self.queue_items[folder_id] = {
+                    'store_name': store_name,
+                    'added_at': datetime.now()
+                }
+    
+    def mark_new_activity_during_processing(self, folder_id):
+        """Mark that a folder received new activity while being processed"""
+        with self.lock:
+            if self.currently_processing == folder_id:
+                self.needs_reprocessing.add(folder_id)
+                return True
+        return False
+    
+    def get_next_to_process(self):
+        """Get next folder that's idle and ready to process"""
+        with self.lock:
+            if self.currently_processing:
+                return None  # Already processing something
+            
+            # Find folders that are idle and have enough files
+            candidates = []
+            for folder_id in self.queue_items.keys():
+                idle_time = self.activity_tracker.get_idle_time(folder_id)
+                file_count = self.activity_tracker.get_file_count(folder_id)
+                
+                if idle_time >= IDLE_THRESHOLD_SECONDS and file_count >= MIN_FILES_TO_PROCESS:
+                    candidates.append((folder_id, idle_time, file_count))
+            
+            if not candidates:
+                return None
+            
+            # Sort by idle time (longest idle first)
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            folder_id, idle_time, file_count = candidates[0]
+            
+            # Mark as processing
+            self.currently_processing = folder_id
+            store_name = self.activity_tracker.get_store_name(folder_id)
+            
+            return {
+                'folder_id': folder_id,
+                'store_name': store_name,
+                'idle_time': idle_time,
+                'file_count': file_count
+            }
+    
+    def finish_processing(self, folder_id):
+        """Mark folder as finished processing"""
+        with self.lock:
+            if self.currently_processing == folder_id:
+                self.currently_processing = None
+                
+                # Check if needs reprocessing
+                if folder_id in self.needs_reprocessing:
+                    self.needs_reprocessing.remove(folder_id)
+                    # Keep in queue for reprocessing
+                    print(f"[Queue] ↩️  {self.activity_tracker.get_store_name(folder_id)} will be reprocessed due to new activity")
+                    return True  # Needs reprocessing
+                else:
+                    # Remove from queue - successfully processed
+                    if folder_id in self.queue_items:
+                        del self.queue_items[folder_id]
+                    self.activity_tracker.reset_folder(folder_id)
+                    return False  # Done
+        return False
+    
+    def get_queue_status(self):
+        """Get current queue status for display"""
+        with self.lock:
+            status = []
+            for folder_id, item in self.queue_items.items():
+                store_name = self.activity_tracker.get_store_name(folder_id)
+                file_count = self.activity_tracker.get_file_count(folder_id)
+                idle_time = self.activity_tracker.get_idle_time(folder_id)
+                
+                status.append({
+                    'store_name': store_name,
+                    'file_count': file_count,
+                    'idle_time': idle_time,
+                    'processing': folder_id == self.currently_processing
+                })
+            
+            # Sort by idle time
+            status.sort(key=lambda x: x['idle_time'], reverse=True)
+            return status
 
 
 def get_all_thumb_folders():
@@ -50,7 +237,7 @@ def get_all_thumb_folders():
 class DatFileHandler(FileSystemEventHandler):
     """Handler for monitoring .dat file creation"""
     
-    def __init__(self, baseline_time, monitor_folder, decode_files=True, folder_label="", processed_files=None, executor=None):
+    def __init__(self, baseline_time, monitor_folder, decode_files=True, folder_label="", processed_files=None, executor=None, activity_tracker=None, processing_queue=None):
         super().__init__()
         self.baseline_time = baseline_time
         self.monitor_folder = monitor_folder
@@ -59,16 +246,56 @@ class DatFileHandler(FileSystemEventHandler):
         self.processed_files = processed_files if processed_files is not None else set()
         self.lock = threading.Lock()
         self.executor = executor  # Thread pool for async decoding
+        self.activity_tracker = activity_tracker  # For thumbnail mode queue
+        self.processing_queue = processing_queue  # For thumbnail mode queue
+        # Load folder mappings for msgattach mode
+        self.folder_to_store = self._load_folder_mappings() if decode_files else {}
+    
+    def _load_folder_mappings(self):
+        """Load folder ID to store name mappings from CSV"""
+        mappings = {}
+        if os.path.exists(CSV_FILE):
+            try:
+                with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        mappings[row['Folder']] = row['Store']
+            except Exception:
+                pass
+        return mappings
+    
+    def _get_store_name_from_path(self, file_path):
+        """Extract store name from file path"""
+        try:
+            parts = file_path.split(os.sep)
+            if 'MsgAttach' in parts:
+                msgattach_idx = parts.index('MsgAttach')
+                if msgattach_idx + 1 < len(parts):
+                    folder_id = parts[msgattach_idx + 1]
+                    return self.folder_to_store.get(folder_id, folder_id)
+        except Exception:
+            pass
+        return None
     
     def decode_file_async(self, file_path, output_path):
         """Decode a file asynchronously in the thread pool"""
         try:
             decode_wechat_dat(file_path, output_path)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{timestamp}] ✓ Decoded: {output_path}")
+            
+            # Get store name for msgattach mode
+            store_name = self._get_store_name_from_path(file_path)
+            store_name_info = f" [{store_name}]" if store_name else ""
+            
+            print(f"[{timestamp}]{store_name_info} ✓ Decoded: {output_path}")
         except Exception as decode_error:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{timestamp}] ✗ Decode failed for {file_path}: {decode_error}")
+            
+            # Get store name for msgattach mode
+            store_name = self._get_store_name_from_path(file_path)
+            store_name_info = f" [{store_name}]" if store_name else ""
+            
+            print(f"[{timestamp}]{store_name_info} ✗ Decode failed for {file_path}: {decode_error}")
     
     def on_created(self, event):
         """Called when a file or directory is created"""
@@ -77,6 +304,10 @@ class DatFileHandler(FileSystemEventHandler):
         
         # Check if it's a .dat file
         if event.src_path.lower().endswith('.dat'):
+            # For msgattach mode, only decode files in Image folders
+            if self.decode_files and '\\Image\\' not in event.src_path:
+                return
+            
             # Get file creation/modification time
             try:
                 with self.lock:
@@ -114,8 +345,29 @@ class DatFileHandler(FileSystemEventHandler):
                         except:
                             pass
                     
-                    print(f"[{timestamp}]{folder_info} New .dat file detected (on_created): {event.src_path}{size_info}")
+                    # Get store name for msgattach mode
+                    store_name_info = ""
+                    if self.decode_files:
+                        store_name = self._get_store_name_from_path(event.src_path)
+                        if store_name:
+                            store_name_info = f" [{store_name}]"
+                    
+                    print(f"[{timestamp}]{folder_info}{store_name_info} New .dat file detected (on_created): {event.src_path}{size_info}")
                     print(f"  File timestamp: {file_time_str}")
+                    
+                    # For thumbnail mode, update activity tracker and queue
+                    if not self.decode_files and self.activity_tracker and self.processing_queue:
+                        folder_id, store_name = self.activity_tracker.update_activity(event.src_path)
+                        if folder_id and store_name:
+                            self.processing_queue.add_or_update(folder_id, store_name)
+                            file_count = self.activity_tracker.get_file_count(folder_id)
+                            
+                            # Check if currently processing this folder
+                            if self.processing_queue.mark_new_activity_during_processing(folder_id):
+                                print(f"  ⚠️  Still processing - will re-queue after completion")
+                            else:
+                                queue_pos = len(self.processing_queue.queue_items)
+                                print(f"  ⏭️  Added to processing queue (position: {queue_pos}, {file_count} files total)")
                     
                     # Auto-decode the file if enabled (asynchronously if executor available)
                     if self.decode_files:
@@ -152,6 +404,10 @@ class DatFileHandler(FileSystemEventHandler):
             return
         
         if event.src_path.lower().endswith('.dat'):
+            # For msgattach mode, only decode files in Image folders
+            if self.decode_files and '\\Image\\' not in event.src_path:
+                return
+            
             try:
                 with self.lock:
                     # Skip if already processed
@@ -166,7 +422,15 @@ class DatFileHandler(FileSystemEventHandler):
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     file_time_str = file_mtime.strftime("%Y-%m-%d %H:%M:%S")
                     folder_info = f" [{self.folder_label}]" if self.folder_label else ""
-                    print(f"[{timestamp}]{folder_info} .dat file detected (on_modified): {event.src_path}")
+                    
+                    # Get store name for msgattach mode
+                    store_name_info = ""
+                    if self.decode_files:
+                        store_name = self._get_store_name_from_path(event.src_path)
+                        if store_name:
+                            store_name_info = f" [{store_name}]"
+                    
+                    print(f"[{timestamp}]{folder_info}{store_name_info} .dat file detected (on_modified): {event.src_path}")
                     print(f"  File timestamp: {file_time_str}")
                     
                     # Auto-decode the file if enabled (asynchronously if executor available)
@@ -269,6 +533,10 @@ def polling_scan(folders_dict, baseline_time, decode_files, handlers_dict, stop_
                         if file.lower().endswith('.dat'):
                             file_path = os.path.join(root, file)
                             
+                            # For msgattach mode, only decode files in Image folders
+                            if decode_files and '\\Image\\' not in file_path:
+                                continue
+                            
                             # Check if already processed
                             with handler.lock:
                                 if file_path in handler.processed_files:
@@ -310,6 +578,20 @@ def polling_scan(folders_dict, baseline_time, decode_files, handlers_dict, stop_
                                         print(f"[{timestamp}]{folder_info} .dat file detected (polling): {file_path}{size_info}")
                                         print(f"  File timestamp: {file_time_str}")
                                         
+                                        # For thumbnail mode, update activity tracker and queue
+                                        if not decode_files and handler.activity_tracker and handler.processing_queue:
+                                            folder_id, store_name = handler.activity_tracker.update_activity(file_path)
+                                            if folder_id and store_name:
+                                                handler.processing_queue.add_or_update(folder_id, store_name)
+                                                file_count = handler.activity_tracker.get_file_count(folder_id)
+                                                
+                                                # Check if currently processing this folder
+                                                if handler.processing_queue.mark_new_activity_during_processing(folder_id):
+                                                    print(f"  ⚠️  Still processing - will re-queue after completion")
+                                                else:
+                                                    queue_pos = len(handler.processing_queue.queue_items)
+                                                    print(f"  ⏭️  Added to processing queue (position: {queue_pos}, {file_count} files total)")
+                                        
                                         # Auto-decode the file if enabled
                                         if decode_files:
                                             try:
@@ -326,6 +608,88 @@ def polling_scan(folders_dict, baseline_time, decode_files, handlers_dict, stop_
                                     pass  # Skip files we can't read
             except Exception as e:
                 pass  # Skip folders we can't access
+
+
+def queue_processor_thread(processing_queue, stop_event):
+    """Background thread that processes the queue of folders"""
+    print("[Queue Processor] Started\n")
+    
+    while not stop_event.is_set():
+        try:
+            # Debug: Show current queue state
+            queue_status = processing_queue.get_queue_status()
+            if queue_status:
+                print(f"[Queue Debug] Current queue: {len(queue_status)} folders")
+                for item in queue_status:
+                    print(f"  - {item['store_name']}: {item['file_count']} files, {item['idle_time']:.0f}s idle, processing={item['processing']}")
+            
+            # Check queue for next item to process
+            next_item = processing_queue.get_next_to_process()
+            
+            if next_item:
+                folder_id = next_item['folder_id']
+                store_name = next_item['store_name']
+                idle_time = next_item['idle_time']
+                file_count = next_item['file_count']
+                
+                print(f"\n{'='*60}")
+                print(f"[Queue] {store_name} has been idle for {idle_time:.0f} seconds")
+                print(f"[Queue] Processing {file_count} files from {store_name}")
+                
+                # Show current queue status
+                queue_status = processing_queue.get_queue_status()
+                status_str = ", ".join([
+                    f"{item['store_name']} ({'processing' if item['processing'] else str(int(item['idle_time'])) + 's idle'})"
+                    for item in queue_status[:5]  # Show first 5
+                ])
+                print(f"[Queue] Status: [{status_str}]")
+                print(f"{'='*60}")
+                
+                # Start auto-navigation Python script directly
+                print(f"[Queue] 🚀 Starting: python wechat_auto_navigator.py --chat {store_name} --prod\n")
+                
+                try:
+                    # Run the Python script directly with the store name and prod mode
+                    result = subprocess.run(
+                        ['python', 'wechat_auto_navigator.py', '--chat', store_name, '--prod'],
+                        capture_output=True,
+                        text=True,
+                        timeout=600  # 10 minute timeout
+                    )
+
+                    # Print any output from the navigator script
+                    if result.stdout:
+                        print(f"[Navigator Output for {store_name}]")
+                        print(result.stdout)
+                    if result.stderr:
+                        print(f"[Navigator Errors for {store_name}]")
+                        print(result.stderr)
+
+                    print(f"\n[Queue] ✓ Completed processing {store_name}")
+                    if result.returncode != 0:
+                        print(f"[Queue] ⚠️  Exit code: {result.returncode}")
+                    
+                except subprocess.TimeoutExpired:
+                    print(f"\n[Queue] ⚠️  Timeout processing {store_name} (10 minutes)")
+                except Exception as e:
+                    print(f"\n[Queue] ✗ Error processing {store_name}: {e}")
+                
+                # Mark as finished
+                needs_reprocessing = processing_queue.finish_processing(folder_id)
+                
+                if not needs_reprocessing:
+                    print(f"[Queue] ✅ {store_name} completed and removed from queue")
+                
+                print()
+            
+            # Sleep before checking again
+            time.sleep(QUEUE_CHECK_INTERVAL)
+            
+        except Exception as e:
+            print(f"[Queue Processor] Error: {e}")
+            time.sleep(QUEUE_CHECK_INTERVAL)
+    
+    print("[Queue Processor] Stopped")
 
 
 def parse_arguments():
@@ -426,6 +790,18 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
         executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="Decoder")
         print("✓ Async decoding thread pool initialized (4 workers)\n")
     
+    # Create activity tracker and processing queue (only for thumbnail mode)
+    activity_tracker = None
+    processing_queue = None
+    queue_processor = None
+    if not decode_files:  # Thumbnail mode
+        activity_tracker = FolderActivityTracker()
+        processing_queue = ProcessingQueue(activity_tracker)
+        print(f"✓ Auto-navigation queue initialized")
+        print(f"  - Idle threshold: {IDLE_THRESHOLD_SECONDS}s")
+        print(f"  - Min files to process: {MIN_FILES_TO_PROCESS}")
+        print(f"  - Queue check interval: {QUEUE_CHECK_INTERVAL}s\n")
+    
     # First, scan for existing files in all folders
     for name, path in existing_folders.items():
         scan_existing_files(path, baseline_time, name, decode_files, processed_files)
@@ -438,7 +814,8 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
     handlers_dict = {}
     for name, path in existing_folders.items():
         event_handler = DatFileHandler(baseline_time, path, decode_files, folder_label=name, 
-                                       processed_files=processed_files, executor=executor)
+                                       processed_files=processed_files, executor=executor,
+                                       activity_tracker=activity_tracker, processing_queue=processing_queue)
         handlers_dict[name] = event_handler
         observer.schedule(event_handler, path, recursive=True)
     
@@ -454,6 +831,16 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
     )
     polling_thread.start()
     
+    # Start queue processor thread for thumbnail mode
+    queue_thread = None
+    if not decode_files and processing_queue:
+        queue_thread = threading.Thread(
+            target=queue_processor_thread,
+            args=(processing_queue, stop_event),
+            daemon=True
+        )
+        queue_thread.start()
+    
     try:
         while True:
             time.sleep(1)
@@ -464,6 +851,12 @@ def start_monitoring(baseline_time=None, folder_choice='msgattach'):
     
     observer.join()
     polling_thread.join(timeout=2)
+    
+    # Wait for queue processor to finish current task
+    if queue_thread:
+        print("Waiting for queue processor to finish...")
+        queue_thread.join(timeout=5)
+        print("Queue processor stopped.")
     
     # Shutdown executor and wait for pending tasks
     if executor:
@@ -577,9 +970,24 @@ BEHAVIOR:
      * Shows file size in KB
      * Filters out files larger than 15KB
      * Only reports small thumbnail files
+     * AUTO-NAVIGATION QUEUE SYSTEM:
+       - Tracks activity for each chat folder
+       - Automatically queues folders when .dat files detected
+       - Shows "⏭️ Added to processing queue" with position and file count
+       - When folder idle for 60 seconds:
+         + Auto-launches: run_wechat_navigator.bat {StoreName} prod
+         + Downloads all images from that chat automatically
+         + Shows queue status and progress
+       - If new files arrive during processing:
+         + Shows "⚠️ Still processing - will re-queue"
+         + Re-processes folder after current run completes
+       - Only processes folders with 3+ files (configurable)
+       - Processes one chat at a time (sequential, not parallel)
+       - Queue automatically prioritizes by idle time
 
 3. To stop:
    - Press Ctrl+C to gracefully stop monitoring
+   - Waits for queue processor to finish current chat
    - Waits for all pending decoding tasks to complete
    - Ensures no files are left partially processed
 
@@ -587,6 +995,10 @@ NOTES:
 ------
 - MsgAttach mode: Monitors single folder with full decoding to JPG
 - Thumbnail mode: Monitors ALL Thumb folders from wechat_folder_mappings.csv (print-only, no decoding)
+- Auto-navigation queue configuration (top of file):
+  * IDLE_THRESHOLD_SECONDS = 60  (wait time before processing)
+  * MIN_FILES_TO_PROCESS = 3  (minimum files to trigger processing)
+  * QUEUE_CHECK_INTERVAL = 5  (seconds between queue checks)
 - File names printed include store name in brackets: [StoreName] for easy identification
 - Requires wechat_folder_mappings.csv in same directory for thumbnail monitoring
 - The baseline time filter applies to both initial scan and continuous monitoring
