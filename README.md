@@ -1,143 +1,212 @@
-# WeChat Image Downloader
+# WeChat Auto Downloader
 
-A Python tool to download images from WeChat group chats and organize them locally.
+A comprehensive Python-based automation tool for monitoring WeChat chats and automatically downloading images using GUI automation. The system continuously monitors for new image thumbnails and navigates through WeChat to download full-resolution images.
 
 ## Features
 
-- 📱 Downloads images from WeChat group chats
-- 📁 Organizes images by group and date
-- ⚙️ Configurable settings via JSON
-- 📊 Detailed logging and progress tracking
-- 🔍 Filter specific groups or download from all
-- 💾 Handles duplicate files automatically
-- 🖼️ Supports multiple image formats (JPG, PNG, GIF, etc.)
+- 📱 **Real-time Monitoring**: Continuously watches for new WeChat image files (.dat thumbnails)
+- 🤖 **GUI Automation**: Automatically navigates through WeChat's image viewer using PyAutoGUI
+- 📁 **Multi-Mode Operation**:
+  - **MsgAttach Mode**: Monitors single MsgAttach folder and decodes .dat files to JPG
+  - **Thumbnail Mode**: Monitors ALL chat thumbnail folders with intelligent queue system
+- ⚡ **Smart Queue System**: Automatically processes chats when idle, handles concurrent activity
+- 🔄 **Production Mode**: Continuous navigation until no new files detected
+- 📊 **Detailed Logging**: Comprehensive logging with store names, file counts, and progress
+- 🏪 **Store Mapping**: CSV-based mapping of chat folders to store names for easy identification
+- ⏱️ **Timeout Protection**: 10-minute safety timeout prevents hanging processes
+- 🔍 **Dual Detection**: Event-based + polling backup for reliable file detection
 
 ## Prerequisites
 
-- WeChat desktop application installed and logged in
-- Python 3.7 or higher
-- Access to WeChat's local database files
+- **WeChat Desktop** installed and logged in
+- **Python 3.7+** with required packages
+- **PyAutoGUI** dependencies (see installation)
+- **WeChat window** must be open and visible for automation
+- **CSV mapping file** (`wechat_folder_mappings.csv`) for chat identification
 
 ## Installation
 
-1. Clone or download this repository
-2. Install required dependencies:
+1. **Clone/download** this repository
+2. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
+3. **Configure folder mappings** in `wechat_folder_mappings.csv`
+4. **Ensure WeChat is installed** and you have access to its data directories
 
 ## Configuration
 
-The tool uses a `config.json` file for settings. Key options include:
+### Folder Mappings (CSV)
+Create `wechat_folder_mappings.csv` with your chat folders:
+```csv
+Folder,Store
+abc123,Family Group
+def456,Work Team
+ghi789,Supermarket Chat
+```
 
-- `output_directory`: Where to save downloaded images
-- `organize_by_group`: Create separate folders for each group
-- `organize_by_date`: Organize images by month/year
-- `target_groups`: Specific groups to download from (empty = all groups)
-- `max_file_size_mb`: Maximum file size to download
-- `image_formats`: Supported image file extensions
+### Key Settings
+Located at the top of `wechat_file_monitor.py`:
+- `MONITOR_FOLDER`: WeChat MsgAttach directory path
+- `IDLE_THRESHOLD_SECONDS`: Wait time before processing (default: 60s)
+- `QUEUE_CHECK_INTERVAL`: Queue check frequency (default: 5s)
+- `MIN_FILES_TO_PROCESS`: Minimum files to trigger processing (default: 1)
 
 ## Usage
 
-### Basic Usage
-
-Download images from all groups:
+### Thumbnail Mode (Recommended)
+Monitor ALL chat thumbnails with automatic processing:
 ```bash
-python wechat_image_downloader.py
+python wechat_file_monitor.py --folder thumbnail
 ```
 
-### Advanced Usage
+**Features:**
+- Monitors all chat thumbnail folders from CSV
+- Shows store names in brackets: `[Supermarket Chat]`
+- Automatically queues and processes chats when idle
+- Displays file counts and queue positions
+- Handles concurrent new file arrivals gracefully
 
-List available groups:
+### MsgAttach Mode
+Monitor single MsgAttach folder for immediate decoding:
 ```bash
-python wechat_image_downloader.py --list-groups
+python wechat_file_monitor.py --folder msgattach
 ```
 
-Download from specific groups:
+### Time-Filtered Monitoring
+Monitor files from a specific start time:
 ```bash
-python wechat_image_downloader.py --groups "Family Group" "Work Team"
+python wechat_file_monitor.py --folder thumbnail --start-time "20241104 10:30"
 ```
 
-Use custom configuration:
-```bash
-python wechat_image_downloader.py --config my_config.json
-```
+### Batch Files
+Convenient batch files are provided:
+- `run_monitor.bat`: Starts thumbnail monitoring
+- `run_wechat_navigator.bat [Chat Name] prod`: Manual navigation for specific chats
 
 ## How It Works
 
-1. **Database Access**: The tool accesses WeChat's local SQLite database to find group chats and image messages
-2. **Image Location**: Locates image files in WeChat's storage directory
-3. **Organization**: Creates organized folder structure based on your settings
-4. **File Management**: Copies images with appropriate naming and handles duplicates
+### 1. **File Monitoring**
+- Uses `watchdog` library for real-time file system monitoring
+- Dual detection: events + polling every 5 seconds
+- Filters files by timestamp and size (thumbnail mode: <15KB)
 
-## Directory Structure
+### 2. **Queue Management** (Thumbnail Mode)
+- Tracks activity for each chat folder
+- Processes chats only when idle for 60+ seconds
+- Handles new files arriving during processing
+- Single-threaded processing (one chat at a time)
 
-After running, your images will be organized like this:
+### 3. **Auto Navigation**
+When a chat is processed:
+1. Launches `wechat_auto_navigator.py --chat [Name] --prod --file-count [N]`
+2. Finds and activates WeChat window
+3. Searches for chat using Ctrl+F
+4. Clicks images and enters gallery view
+5. **Production Mode**: Continuously presses left arrow while monitoring for new files
+6. Stops automatically when no new files detected for 2 cycles
+
+### 4. **Output Organization**
+Images are saved to `C:\Users\[User]\OneDrive\Documents\WeChat Decoded Images2\` with folder structure mirroring the source.
+
+## Sample Output
+
 ```
-downloaded_images/
-├── Group Name 1/
-│   ├── 2024-01/
-│   │   ├── 20240115_143022_12345.jpg
-│   │   └── 20240118_091205_12346.png
-│   └── 2024-02/
-│       └── 20240201_200314_12347.gif
-└── Group Name 2/
-    └── 2024-01/
-        └── 20240120_155530_12348.jpg
+Starting continuous monitoring...
+Press Ctrl+C to stop monitoring
+
+[Queue Processor] Started
+
+[2025-11-06 20:51:17] [Henderson] .dat file detected (polling): C:\...\Thumb\2025-11\file.dat (size: 6.1 KB)
+  File timestamp: 2025-11-06 20:51:15
+  ⏭️  Added to processing queue (position: 1, 23 files total)
+
+[Queue] Henderson has been idle for 60 seconds
+[Queue] 🚀 Starting: python wechat_auto_navigator.py --chat Henderson --prod --file-count 23
+
+[Navigator Output for Henderson]
+============================================================
+WeChat Auto Navigator
+MODE: PRODUCTION (continuous until no new files)
+============================================================
+
+What this script does:
+- Finds and activates WeChat window
+- Navigates to 'Henderson' chat
+- Continuously presses left arrow until no new files
+
+[Arrow 1] Pressing left arrow...
+[Arrow 1] Waiting 2.3 seconds for new files...
+[Arrow 1] ✓ New files detected, continuing...
+...
 ```
 
 ## Important Notes
 
-⚠️ **Database Access**: This tool requires access to WeChat's database files. Make sure:
-- WeChat is closed when running the tool
-- You have read permissions to WeChat's data directory
-- Your antivirus doesn't block database access
+⚠️ **WeChat Must Be Open**: The automation requires WeChat desktop to be running and visible.
 
-⚠️ **WeChat Versions**: Database structure may vary between WeChat versions. The tool attempts to handle common variations.
+⚠️ **Mouse Safety**: Move mouse to top-left corner to abort navigation at any time.
 
-⚠️ **Privacy**: This tool only accesses your local WeChat data. No data is sent online.
+⚠️ **Single Chat Processing**: Only one chat processes at a time to avoid conflicts.
+
+⚠️ **10-Minute Timeout**: Safety mechanism prevents infinite hanging.
+
+⚠️ **Local Data Only**: No data is sent online - only accesses your local WeChat files.
 
 ## Troubleshooting
 
-### "WeChat database not found"
-- Ensure WeChat is installed and you've logged in at least once
-- Check if WeChat is running and close it
-- Manually specify database path in config.json
+### "No Thumb folders found"
+- Verify `wechat_folder_mappings.csv` exists and has correct paths
+- Check that thumbnail folders exist in the expected locations
+- Run with `--folder msgattach` for basic functionality
+
+### "WeChat window not found"
+- Ensure WeChat desktop is open and visible
+- Try running WeChat as administrator
+- Check if WeChat window title matches expectations
 
 ### "Permission denied" errors
-- Run as administrator (Windows)
-- Check file permissions on WeChat directories
-- Temporarily disable antivirus scanning
+- Run command prompt as administrator
+- Check antivirus isn't blocking file access
+- Verify WeChat data directory permissions
 
-### "No images found"
-- Verify the groups have image messages
-- Check if images are stored locally (not just in cloud)
-- Try with a different group
+### Queue not processing
+- Check `IDLE_THRESHOLD_SECONDS` (default 60s)
+- Verify `MIN_FILES_TO_PROCESS` threshold (default 1)
+- Look for concurrent file activity preventing idle state
 
-## Configuration Examples
+### Automation not working
+- Ensure WeChat window is in focus
+- Check screen resolution/scaling settings
+- Verify PyAutoGUI can control the desktop
+- Try with different delay settings in navigator
 
-### Download only from specific groups:
-```json
-{
-  "target_groups": ["Family", "Work Team", "Friends"],
-  "organize_by_group": true,
-  "organize_by_date": true
-}
-```
+## Architecture
 
-### Flat organization (all images in one folder):
-```json
-{
-  "organize_by_group": false,
-  "organize_by_date": false,
-  "output_directory": "./all_wechat_images"
-}
-```
+### Core Components
+- **`wechat_file_monitor.py`**: Main monitoring and queue system
+- **`wechat_auto_navigator.py`**: GUI automation for WeChat navigation
+- **`wechat_decoder.py`**: .dat file decryption and JPG conversion
+- **`run_wechat_navigator.bat`**: Convenience batch file launcher
+
+### Processing Flow
+1. **Monitor** detects new .dat files
+2. **Queue** manages processing order by idle time
+3. **Navigator** automates WeChat GUI to download images
+4. **Decoder** converts .dat files to viewable images
+
+## Development
+
+### Adding New Features
+- Queue logic in `ProcessingQueue` class
+- Navigation patterns in `WeChatNavigator` class
+- File detection in `DatFileHandler` class
+
+### Testing
+- Test with small file counts first
+- Use `--delay` parameter to slow down automation
+- Monitor logs for timing and error patterns
 
 ## License
 
-This project is for personal use only. Please respect WeChat's terms of service and privacy policies.
-
-## Contributing
-
-Feel free to submit issues and enhancement requests!
+Personal use only. Respect WeChat's terms of service and local data privacy laws.
