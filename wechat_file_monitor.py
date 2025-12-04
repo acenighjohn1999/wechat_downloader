@@ -4,12 +4,22 @@ import argparse
 import csv
 import threading
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from datetime import datetime, timedelta
 from wechat_decoder import decode_wechat_dat
 from collections import defaultdict
+
+# Import auto-annotation module from asian_grocer_scrapers repo
+sys.path.insert(0, r'C:\Users\henry\source\repos\asian_grocer_scrapers')
+try:
+    from auto_annotator import auto_annotate_duplicate_image
+    AUTO_ANNOTATION_AVAILABLE = True
+except ImportError:
+    AUTO_ANNOTATION_AVAILABLE = False
+    print("[Warning] Auto-annotation module not available")
 
 # Folders to monitor
 MONITOR_FOLDER = r"C:\Users\henry\OneDrive\Documents\WeChat Files\wxid_5zk2tbe173ua22\FileStorage\MsgAttach"
@@ -288,6 +298,21 @@ class DatFileHandler(FileSystemEventHandler):
             store_name_info = f" [{store_name}]" if store_name else ""
             
             print(f"[{timestamp}]{store_name_info} ✓ Decoded: {output_path}")
+            
+            # Auto-annotate if available and store name exists
+            if AUTO_ANNOTATION_AVAILABLE and store_name and os.path.exists(output_path):
+                try:
+                    # Set paths relative to asian_grocer_scrapers repo (using cache_data folder)
+                    annotations_file = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache_data\image_annotations.json'
+                    duplicates_report = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache_data\duplicates_report.txt'
+                    store_date_rules = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache\store_date_rules.csv'
+                    
+                    if auto_annotate_duplicate_image(output_path, store_name, annotations_file, 
+                                                     duplicates_report, store_date_rules):
+                        print(f"  ✓ Auto-annotated: {os.path.basename(output_path)}")
+                except Exception as annotate_error:
+                    # Don't fail decoding if annotation fails
+                    pass
         except Exception as decode_error:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -388,6 +413,21 @@ class DatFileHandler(FileSystemEventHandler):
                             try:
                                 decode_wechat_dat(event.src_path, output_path)
                                 print(f"  ✓ Decoded to: {output_path}")
+                                
+                                # Auto-annotate if available
+                                if AUTO_ANNOTATION_AVAILABLE:
+                                    try:
+                                        store_name = self._get_store_name_from_path(event.src_path)
+                                        if store_name and os.path.exists(output_path):
+                                            annotations_file = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache_data\image_annotations.json'
+                                            duplicates_report = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache_data\duplicates_report.txt'
+                                            store_date_rules = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache\store_date_rules.csv'
+                                            
+                                            if auto_annotate_duplicate_image(output_path, store_name, annotations_file,
+                                                                             duplicates_report, store_date_rules):
+                                                print(f"  ✓ Auto-annotated: {os.path.basename(output_path)}")
+                                    except Exception:
+                                        pass  # Don't fail decoding if annotation fails
                             except Exception as decode_error:
                                 print(f"  ✗ Decode failed: {decode_error}")
             except Exception as e:
@@ -528,6 +568,41 @@ def scan_existing_files(folder, baseline_time, folder_name="", decode_files=True
                                 decode_wechat_dat(file_path, output_path)
                                 print(f"  ✓ Decoded to: {output_path}")
                                 decoded_count += 1
+                                
+                                # Auto-annotate if available
+                                if AUTO_ANNOTATION_AVAILABLE:
+                                    try:
+                                        # Get store name from path
+                                        parts = file_path.split(os.sep)
+                                        store_name = None
+                                        if 'MsgAttach' in parts:
+                                            msgattach_idx = parts.index('MsgAttach')
+                                            if msgattach_idx + 1 < len(parts):
+                                                folder_id = parts[msgattach_idx + 1]
+                                                # Try to get store name from CSV
+                                                if os.path.exists(CSV_FILE):
+                                                    try:
+                                                        with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                                                            reader = csv.DictReader(f)
+                                                            for row in reader:
+                                                                if row['Folder'] == folder_id:
+                                                                    store_name = row['Store']
+                                                                    break
+                                                    except:
+                                                        pass
+                                                if not store_name:
+                                                    store_name = folder_id
+                                        
+                                        if store_name and os.path.exists(output_path):
+                                            annotations_file = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache_data\image_annotations.json'
+                                            duplicates_report = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache_data\duplicates_report.txt'
+                                            store_date_rules = r'C:\Users\henry\source\repos\asian_grocer_scrapers\cache\store_date_rules.csv'
+                                            
+                                            if auto_annotate_duplicate_image(output_path, store_name, annotations_file,
+                                                                             duplicates_report, store_date_rules):
+                                                print(f"  ✓ Auto-annotated: {os.path.basename(output_path)}")
+                                    except Exception:
+                                        pass  # Don't fail decoding if annotation fails
                             except Exception as decode_error:
                                 print(f"  ✗ Decode failed: {decode_error}")
                 except Exception as e:
@@ -631,6 +706,41 @@ def polling_scan(folders_dict, baseline_time, decode_files, handlers_dict, stop_
                                                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                                                 decode_wechat_dat(file_path, output_path)
                                                 print(f"  ✓ Decoded to: {output_path}")
+                                                
+                                                # Auto-annotate if available
+                                                if AUTO_ANNOTATION_AVAILABLE:
+                                                    try:
+                                                        # Get store name from path
+                                                        parts = file_path.split(os.sep)
+                                                        store_name = None
+                                                        if 'MsgAttach' in parts:
+                                                            msgattach_idx = parts.index('MsgAttach')
+                                                            if msgattach_idx + 1 < len(parts):
+                                                                folder_id = parts[msgattach_idx + 1]
+                                                                # Try to get store name from CSV
+                                                                if os.path.exists(CSV_FILE):
+                                                                    try:
+                                                                        with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                                                                            reader = csv.DictReader(f)
+                                                                            for row in reader:
+                                                                                if row['Folder'] == folder_id:
+                                                                                    store_name = row['Store']
+                                                                                    break
+                                                                    except:
+                                                                        pass
+                                                                if not store_name:
+                                                                    store_name = folder_id
+                                                        
+                                                        if store_name and os.path.exists(output_path):
+                                                            annotations_file = r'C:\Users\henry\source\repos\asian_grocer_scrapers\image_annotations.json'
+                                                            duplicates_report = r'C:\Users\henry\source\repos\asian_grocer_scrapers\duplicates_report.txt'
+                                                            store_date_rules = r'C:\Users\henry\source\repos\asian_grocer_scrapers\store_date_rules.csv'
+                                                            
+                                                            if auto_annotate_duplicate_image(output_path, store_name, annotations_file,
+                                                                                             duplicates_report, store_date_rules):
+                                                                print(f"  ✓ Auto-annotated: {os.path.basename(output_path)}")
+                                                    except Exception:
+                                                        pass  # Don't fail decoding if annotation fails
                                             except Exception as decode_error:
                                                 print(f"  ✗ Decode failed: {decode_error}")
                                 except Exception as e:
